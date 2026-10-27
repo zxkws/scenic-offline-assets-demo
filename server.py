@@ -30,8 +30,10 @@ MIME = {
     ".webp": "image/webp", ".mp3": "audio/mpeg", ".wav": "audio/wav",
     ".m4a": "audio/mp4", ".mp4": "video/mp4", ".webm": "video/webm"
 }
+MEDIA_TYPES = {"image", "audio", "video"}
 PUBLISH_LOCK = threading.Lock()
 MAX_UPLOAD = 512 * 1024 * 1024
+MAX_JSON = 8192
 
 
 @contextmanager
@@ -95,7 +97,8 @@ def initialize():
                 id TEXT PRIMARY KEY, scenic_id TEXT NOT NULL REFERENCES scenic(id),
                 name TEXT NOT NULL, position INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS category (
-                code TEXT PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL);
+                code TEXT PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL,
+                media_type TEXT NOT NULL DEFAULT 'image');
             CREATE TABLE IF NOT EXISTS file (
                 id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL,
                 size INTEGER NOT NULL, sha256 TEXT UNIQUE NOT NULL, mime TEXT NOT NULL);
@@ -109,6 +112,12 @@ def initialize():
                 published_at TEXT NOT NULL, manifest TEXT NOT NULL,
                 PRIMARY KEY (scenic_id,version));
         """)
+        # Existing demo databases had no media_type. Add it without wiping user uploads.
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(category)")}
+        if "media_type" not in columns:
+            db.execute("ALTER TABLE category ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'")
+            db.execute("UPDATE category SET media_type='audio' WHERE code IN ('guide_audio','safety_audio')")
+            db.execute("UPDATE category SET media_type='video' WHERE code='guide_video'")
         if db.execute("SELECT COUNT(*) FROM scenic").fetchone()[0]:
             return
         db.executemany("INSERT INTO scenic (id,name) VALUES (?,?)", [
@@ -117,9 +126,11 @@ def initialize():
             ("A-S01", "A", "游客中心", 1), ("A-S02", "A", "山顶观景台", 2),
             ("B-S01", "B", "古镇入口", 1),
             ("C-S01", "C", "湖心站", 1), ("C-S02", "C", "大桥站", 2)])
-        db.executemany("INSERT INTO category VALUES (?,?,?)", [
-            ("gallery", "景点图片", 1), ("guide_audio", "讲解音频", 2),
-            ("guide_video", "介绍视频", 3), ("safety_audio", "安全播报", 4)])
+        db.executemany("INSERT INTO category (code,name,position,media_type) VALUES (?,?,?,?)", [
+            ("gallery", "景点图片", 1, "image"),
+            ("guide_audio", "讲解音频", 2, "audio"),
+            ("guide_video", "介绍视频", 3, "video"),
+            ("safety_audio", "安全播报", 4, "audio")])
         samples = [
             ("A-S01", "gallery", "游客中心图片", make_png((31,130,98)), ".png"),
             ("A-S01", "guide_audio", "中文讲解音频", make_wav(440), ".wav"),
@@ -157,17 +168,19 @@ def publish(scenic_id):
         groups = {}
         for item in db.execute("""
             SELECT m.id, m.station_id, m.title, c.code, c.name AS category_name,
+                   c.media_type,
                    f.id AS file_id, f.path, f.size, f.sha256, f.mime
             FROM station_material m
             JOIN station s ON s.id=m.station_id
             JOIN category c ON c.code=m.category_code
             JOIN file f ON f.id=m.file_id
             WHERE s.scenic_id=?
-            ORDER BY s.position,c.position,m.position,m.id
+            ORDER BY s.position,s.id,c.position,c.code,m.position,m.id
         """, (scenic_id,)):
             key = (item["station_id"], item["code"])
             if key not in groups:
-                group = {"code": item["code"], "name": item["category_name"], "items": []}
+                group = {"code": item["code"], "name": item["category_name"],
+                         "mediaType": item["media_type"], "items": []}
                 lookup[item["station_id"]]["categories"].append(group)
                 groups[key] = group
             groups[key]["items"].append({
@@ -200,12 +213,42 @@ class Handler(BaseHTTPRequestHandler):
     def respond(self, status, obj):
         self.send_data(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+    def read_json(self):
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            raise ValueError("Expected application/json")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("Invalid content length")
+        if not 0 < length <= MAX_JSON:
+            raise ValueError("Invalid JSON size")
+        try:
+            data = json.loads(self.rfile.read(length))
+        except (ValueError, UnicodeError):
+            raise ValueError("Invalid JSON body")
+        if not isinstance(data, dict):
+            raise ValueError("Expected JSON object")
+        return data
+
+    @staticmethod
+    def validate_category(code, name, media_type, position):
+        if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", code):
+            raise ValueError("Code must be 2-40 characters: a-z, 0-9, _")
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
+            raise ValueError("Name must be 1-40 characters")
+        if not isinstance(media_type, str) or media_type not in MEDIA_TYPES:
+            raise ValueError("Media type must be image, audio or video")
+        if isinstance(position, bool) or not isinstance(position, int) or position < 1:
+            raise ValueError("Position must be a positive integer")
+
     def do_GET(self):
         url = urlsplit(self.path)
         path = url.path
         params = parse_qs(url.query)
         if path == "/":
             return self.send_data(200, (ROOT / "web/index.html").read_bytes(), "text/html; charset=utf-8")
+        if path == "/app.js":
+            return self.send_data(200, (ROOT / "web/app.js").read_bytes(), "text/javascript; charset=utf-8")
         if path == "/api/health":
             return self.respond(200, {"ok": True})
         if path.startswith("/assets/"):
@@ -261,7 +304,7 @@ class Handler(BaseHTTPRequestHandler):
                     (params.get("scenicId", [""])[0],))])
             if path == "/api/categories":
                 return self.respond(200, [dict(r) for r in db.execute(
-                    "SELECT code,name FROM category ORDER BY position")])
+                    "SELECT code,name,media_type AS mediaType,position FROM category ORDER BY position,code")])
             if path == "/api/materials":
                 return self.respond(200, [dict(r) for r in db.execute("""
                     SELECT m.id,m.title,m.category_code AS categoryCode,
@@ -282,6 +325,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlsplit(self.path)
+        if url.path == "/api/categories":
+            try:
+                data = self.read_json()
+                code = data.get("code")
+                name = data.get("name")
+                media_type = data.get("mediaType")
+                with database() as db:
+                    position = data.get("position")
+                    if position is None:
+                        position = db.execute("SELECT COALESCE(MAX(position),0)+1 FROM category").fetchone()[0]
+                    self.validate_category(code, name, media_type, position)
+                    if db.execute("SELECT 1 FROM category WHERE code=?", (code,)).fetchone():
+                        return self.respond(409, {"error": "分类编码已存在"})
+                    db.execute("INSERT INTO category (code,name,position,media_type) VALUES (?,?,?,?)",
+                               (code, name.strip(), position, media_type))
+                return self.respond(201, {"code": code, "name": name.strip(),
+                                          "mediaType": media_type, "position": position})
+            except ValueError as error:
+                self.close_connection = True
+                return self.respond(400, {"error": str(error)})
         match = re.fullmatch(r"/api/scenics/([A-Za-z0-9_-]+)/publish", url.path)
         if match:
             try:
@@ -304,10 +367,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return self.respond(400, {"error": "Bad title or unsupported file (max 512 MB)"})
         with database() as db:
+            category_row = db.execute("SELECT media_type FROM category WHERE code=?", (category,)).fetchone()
             if (not db.execute("SELECT 1 FROM station WHERE id=?", (station,)).fetchone()
-                or not db.execute("SELECT 1 FROM category WHERE code=?", (category,)).fetchone()):
+                or category_row is None):
                 self.close_connection = True
                 return self.respond(400, {"error": "Unknown station or category"})
+            if MIME[extension].split("/")[0] != category_row["media_type"]:
+                self.close_connection = True
+                return self.respond(400, {"error": "文件类型与素材分类不匹配"})
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(dir=ASSETS, suffix=".part", delete=False) as out:
@@ -323,8 +390,10 @@ class Handler(BaseHTTPRequestHandler):
                     remaining -= len(block)
             sha = digest.hexdigest()
             with database() as db:
-                row = db.execute("SELECT id FROM file WHERE sha256=?", (sha,)).fetchone()
+                row = db.execute("SELECT id,mime FROM file WHERE sha256=?", (sha,)).fetchone()
                 if row:
+                    if row["mime"].split("/")[0] != MIME[extension].split("/")[0]:
+                        return self.respond(400, {"error": "该文件已以其他媒体类型上传"})
                     file_id = row["id"]
                 else:
                     file_id = "f_" + uuid.uuid4().hex[:12]
@@ -341,8 +410,50 @@ class Handler(BaseHTTPRequestHandler):
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
+    def do_PATCH(self):
+        match = re.fullmatch(r"/api/categories/([a-z][a-z0-9_]{1,39})", urlsplit(self.path).path)
+        if not match:
+            return self.respond(404, {"error": "Not found"})
+        code = match.group(1)
+        try:
+            data = self.read_json()
+            if "code" in data and data["code"] != code:
+                raise ValueError("分类编码不可修改")
+            with database() as db:
+                old = db.execute("SELECT name,media_type,position FROM category WHERE code=?", (code,)).fetchone()
+                if old is None:
+                    return self.respond(404, {"error": "分类不存在"})
+                name = data.get("name", old["name"])
+                media_type = data.get("mediaType", old["media_type"])
+                position = data.get("position", old["position"])
+                self.validate_category(code, name, media_type, position)
+                if media_type != old["media_type"] and db.execute("""
+                    SELECT 1 FROM station_material m JOIN file f ON f.id=m.file_id
+                    WHERE m.category_code=? AND f.mime NOT LIKE ? LIMIT 1
+                """, (code, media_type + "/%")).fetchone():
+                    return self.respond(409, {"error": "分类已有不匹配的素材，不能修改媒体类型"})
+                db.execute("UPDATE category SET name=?,media_type=?,position=? WHERE code=?",
+                           (name.strip(), media_type, position, code))
+            self.respond(200, {"code": code, "name": name.strip(),
+                               "mediaType": media_type, "position": position})
+        except ValueError as error:
+            self.close_connection = True
+            self.respond(400, {"error": str(error)})
+
     def do_DELETE(self):
-        match = re.fullmatch(r"/api/materials/(m_[0-9a-f]+)", urlsplit(self.path).path)
+        path = urlsplit(self.path).path
+        category = re.fullmatch(r"/api/categories/([a-z][a-z0-9_]{1,39})", path)
+        if category:
+            with database() as db:
+                code = category.group(1)
+                if not db.execute("SELECT 1 FROM category WHERE code=?", (code,)).fetchone():
+                    return self.respond(404, {"error": "分类不存在"})
+                if db.execute("SELECT 1 FROM station_material WHERE category_code=? LIMIT 1",
+                              (code,)).fetchone():
+                    return self.respond(409, {"error": "分类正在使用，请先删除素材引用"})
+                db.execute("DELETE FROM category WHERE code=?", (code,))
+            return self.respond(200, {"deleted": True})
+        match = re.fullmatch(r"/api/materials/(m_[0-9a-f]+)", path)
         if not match:
             return self.respond(404, {"error": "Not found"})
         with database() as db:

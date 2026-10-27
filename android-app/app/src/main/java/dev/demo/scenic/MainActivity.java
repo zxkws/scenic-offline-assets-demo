@@ -2,7 +2,9 @@ package dev.demo.scenic;
 
 import android.app.Activity;
 import android.os.Bundle;
-import android.widget.TextView;
+import android.graphics.Color;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.*;
@@ -16,14 +18,17 @@ import java.util.Iterator;
 public class MainActivity extends Activity {
     // Android emulator host address. Replace with the LAN server for an actual vehicle.
     private static final String BASE = "http://10.0.2.2:8765";
-    private TextView view;
+    private MediaBrowser browser;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        view = new TextView(this);
-        view.setTextSize(18);
-        view.setPadding(24, 32, 24, 32);
-        setContentView(view);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(24, 32, 24, 32);
+        scroll.addView(content);
+        browser = new MediaBrowser(this, content);
+        setContentView(scroll);
         render("正在自动同步三个景区…");
         new Thread(() -> {
             try { sync(); render("同步完成"); }
@@ -32,34 +37,24 @@ public class MainActivity extends Activity {
     }
 
     private void render(String status) {
-        StringBuilder text = new StringBuilder(status).append("\n\n");
-        for (String id : new String[]{"A", "B", "C"}) {
-            File active = new File(getFilesDir(), "scenic/" + id + "/active.json");
-            if (!active.isFile()) { text.append(id).append("：尚未下载\n"); continue; }
-            try {
-                JSONObject manifest = new JSONObject(read(active));
-                text.append(manifest.getString("scenicName")).append(" v")
-                    .append(manifest.getInt("version")).append("\n");
-                JSONArray stations = manifest.getJSONArray("stations");
-                for (int i = 0; i < stations.length(); i++) {
-                    JSONObject s = stations.getJSONObject(i);
-                    text.append("  ").append(s.getString("name")).append("\n");
-                    JSONArray groups = s.getJSONArray("categories");
-                    for (int j = 0; j < groups.length(); j++) {
-                        JSONObject group = groups.getJSONObject(j);
-                        text.append("    ").append(group.getString("name")).append(": ");
-                        JSONArray items = group.getJSONArray("items");
-                        for (int k = 0; k < items.length(); k++) {
-                            if (k > 0) text.append("、");
-                            text.append(items.getJSONObject(k).getString("title"));
-                        }
-                        text.append("\n");
-                    }
+        runOnUiThread(() -> {
+            if (isDestroyed()) return;
+            browser.clear();
+            browser.label(status, 18, Color.DKGRAY);
+            for (String id : new String[]{"A", "B", "C"}) {
+                File folder = new File(getFilesDir(), "scenic/" + id);
+                File active = new File(folder, "active.json");
+                if (!active.isFile()) {
+                    browser.label(id + "：尚未下载", 16, Color.GRAY);
+                    continue;
                 }
-                text.append("\n");
-            } catch (Exception e) { text.append(id).append("：读取失败\n"); }
-        }
-        runOnUiThread(() -> view.setText(text.toString()));
+                try {
+                    browser.showScenic(new JSONObject(read(active)), folder);
+                } catch (Exception e) {
+                    browser.label(id + "：本地清单读取失败", 16, Color.RED);
+                }
+            }
+        });
     }
 
     private void sync() throws Exception {
@@ -79,6 +74,10 @@ public class MainActivity extends Activity {
                 File local = new File(files, hash + remote.substring(remote.lastIndexOf('.')));
                 if (valid(local, asset)) continue;
                 File part = new File(files, local.getName() + ".part");
+                // A complete but corrupted .part cannot be resumed with HTTP Range.
+                if (part.isFile() && part.length() >= asset.getLong("size") && !valid(part, asset)) {
+                    if (!part.delete()) throw new IOException("remove corrupted partial file failed");
+                }
                 download(BASE + remote, part);
                 if (!valid(part, asset)) throw new IOException("SHA-256 mismatch");
                 if (!part.renameTo(local)) throw new IOException("rename failed");
@@ -145,5 +144,10 @@ public class MainActivity extends Activity {
         StringBuilder hex = new StringBuilder();
         for (byte b : sha.digest()) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
         return meta.getString("sha256").equals(hex.toString());
+    }
+
+    @Override protected void onDestroy() {
+        if (browser != null) browser.stopMedia();
+        super.onDestroy();
     }
 }

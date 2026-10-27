@@ -14,12 +14,36 @@ python3 server.py
 
 后台选择景区、站点、分类，上传图片/音频/视频，随后点击**发布新版本**。可查看生成的 `manifest.json`。
 
+### 新增一种素材分类（不需要改代码）
+
+1. 在 Web 后台的 **「素材分类管理」** 中填写编码 `background_music`、名称「背景音乐」、媒体类型选「音频」，点击「新增分类」。
+2. 选择景区 A → 游客中心 → 刚创建的「背景音乐」，上传一个 MP3 或 WAV。
+3. 点击 **发布新版本**，在 JSON 的 `stations[].categories[]` 中会出现新分类：
+
+```json
+{
+  "code": "background_music",
+  "name": "背景音乐",
+  "mediaType": "audio",
+  "items": [{"id": "m_...", "title": "车载背景音乐", "fileId": "f_..."}]
+}
+```
+
+4. 运行 `python3 client.py`，只会下载缺失或变化的文件；Android 会按这个分类动态显示音频播放入口，**不需要为新编码写特殊页面**。
+
+支持修改分类名称、媒体类型、排序；**编码创建后固定**。已被素材引用的分类不能删除；改变媒体类型时也不能与现有文件类型冲突。分类为所有景区共用的定义，但每个景区的站点、素材和发布版本仍独立。新建空分类不会出现在站点的 JSON 中。
+
+分类可选的媒体类型为 `image`、`audio`、`video`，和业务分类编码是两个概念。新业务分类可以直接配置；**新增真正的文件格式或复杂业务播放规则**仍可能需要升级客户端。
+
 公开的示例接口：
 
 ```text
 GET    /api/scenics
 GET    /api/stations?scenicId=A
 GET    /api/categories
+POST   /api/categories                         (JSON: code,name,mediaType,position?)
+PATCH  /api/categories/{code}                  (JSON: name?,mediaType?,position?)
+DELETE /api/categories/{code}
 GET    /api/materials?stationId=A-S01
 POST   /api/materials?stationId=A-S01&categoryCode=gallery&title=xxx&filename=photo.png
 DELETE /api/materials/{materialId}
@@ -28,7 +52,9 @@ GET    /api/scenics/A/manifest
 GET    /assets/{sha256}.png
 ```
 
-上传接口的请求体为原始文件字节（`application/octet-stream`），Web 页面已处理。示例文件与 SQLite DB 在 `runtime/` 中，默认不纳入 Git；已发布 JSON 快照位于 `runtime/exports/`。发布后数据库保存不可变的 JSON 快照，未发布的修改对客户端不可见。
+分类创建/修改接口使用 `Content-Type: application/json`。上传接口的请求体为原始文件字节（`application/octet-stream`），Web 页面已处理；后端会根据分类 `mediaType` 校验上传文件的扩展名所属媒体类型（仅 Demo 级校验，不检查真实内容）。示例文件与 SQLite DB 在 `runtime/` 中，默认不纳入 Git；已发布 JSON 快照位于 `runtime/exports/`。发布后数据库保存不可变的 JSON 快照，未发布的修改对客户端不可见。
+
+**从旧版 Demo 升级：** 保留 `runtime/`，直接运行最新 `server.py`。程序会为旧 `category` 表自动增加 `media_type` 列，并为原有讲解音频、安全播报、景点视频分类补上正确媒体类型，不删除已有素材及发布版本。
 
 ## 离线客户端示范
 
@@ -43,7 +69,9 @@ python3 client.py
 
 ## Android 原生 App
 
-用 Android Studio 打开 `android-app/`，构建运行即可。Android 示例（Java，最低 API 26）启动时自动下载所有景区，显示本地景区、站点与素材标题；断网重开读取本地数据。无需用户点击下载。
+用 Android Studio 打开 `android-app/`，构建运行即可。Android 示例（Java，最低 API 26）启动时自动下载所有景区；按 `active.json` 动态展示任意分类、任意数量的素材，并依据文件 `mimeType` 渲染**图片预览、音频播放、视频播放**。断网重开读取本地数据。无需用户点击下载。
+
+例如新增 `background_music` 或 `safety_audio`，Android 不需要硬编码分类名称，而是自动复用音频播放器。这里只演示**手动点击播放预览**，不代表具备到站自动播报、循环、抢占优先级等具体车机业务规则。
 
 - Android 模拟器：默认服务器 `http://10.0.2.2:8765`，后端启动方式不变。
 - 实际车机：将 `MainActivity.java` 中的 `BASE` 改为后端可访问的 LAN 地址，服务器用 `python3 server.py --host 0.0.0.0` 在**可信局域网**里启动。
