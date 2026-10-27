@@ -1,0 +1,8 @@
+runtime/
+*.pyc
+__pycache__/
+.DS_Store
+.gradle/
+**/build/
+local.properties
+.idea/

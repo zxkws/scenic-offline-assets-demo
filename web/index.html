@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>景区离线素材 Demo</title>
+<style>
+body{font:15px system-ui,-apple-system,sans-serif;background:#f4f6fa;color:#202939;margin:0}main{max-width:880px;margin:35px auto;padding:0 18px}
+.card{background:white;border:1px solid #e4e8f0;border-radius:14px;padding:20px;margin:15px 0}
+h1{font-size:24px}h2{font-size:17px;margin:0 0 14px}label{display:block;margin:12px 0 6px}
+select,input,button{font:inherit;padding:10px;border:1px solid #cbd5e1;border-radius:8px}
+select{width:100%;background:white}input[type=text]{width:calc(100% - 24px)}button{background:#1468d4;color:white;border:0;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}.muted{color:#687386;font-size:13px}
+.item{display:flex;gap:12px;align-items:center;justify-content:space-between;border-top:1px solid #e9edf3;padding:10px 0}
+.item div{min-width:0;overflow-wrap:anywhere}.small{padding:6px 10px;background:#e9eef6;color:#28394e}
+pre{background:#132235;color:#cfe7ff;padding:16px;border-radius:8px;max-height:350px;overflow:auto}
+</style>
+<main>
+<h1>景区离线素材管理 Demo</h1>
+<p class="muted">SQLite → 景区 → 站点 → 分类 → 素材 → 发布 manifest.json。示例无登录鉴权，只能用于本机或可信测试网络。</p>
+<section class="card"><h2>1. 选择景区和站点</h2>
+<label>景区</label><select id="scenic"></select>
+<label>站点</label><select id="station"></select></section>
+<section class="card"><h2>2. 当前站点素材</h2><div id="materials"></div>
+<h2>新增素材</h2><label>素材分类</label><select id="category"></select>
+<label>标题</label><input id="title" type="text" placeholder="例如：中文讲解">
+<label>文件（图片 / 音频 / 视频）</label><input id="file" type="file" accept="image/*,audio/*,video/*">
+<p><button id="upload">上传素材（尚未发布）</button></p></section>
+<section class="card"><h2>3. 发布当前景区</h2>
+<p>发布才会更新对车机可见的 JSON。后续车机比较 SHA-256，只下载新文件。</p>
+<button id="publish">发布新版本</button> <a id="manifestLink" target="_blank">查看已发布 JSON</a>
+<p id="message" class="muted"></p><pre id="preview"></pre></section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw Error(body.error||response.status);return body}
+async function loadScenics(){const data=await api('/api/scenics');$('scenic').innerHTML=data.map(x=>`<option value="${esc(x.id)}">${esc(x.name)} · v${x.version}</option>`).join('');await loadStations()}
+async function loadStations(){const id=$('scenic').value;const data=await api('/api/stations?scenicId='+encodeURIComponent(id));$('station').innerHTML=data.map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');await loadMaterials();await loadManifest()}
+async function loadMaterials(){const rows=await api('/api/materials?stationId='+encodeURIComponent($('station').value));$('materials').innerHTML=rows.length?rows.map(x=>`<div class="item"><div><b>${esc(x.title)}</b><br><span class="muted">${esc(x.categoryCode)} · ${esc(x.mime)} · ${(x.size/1024).toFixed(1)} KiB</span></div><button class="small" data-id="${esc(x.id)}">删除</button></div>`).join(''):'<p class="muted">该站点尚无素材</p>'}
+async function loadManifest(){const scenic=$('scenic').value;const path='/api/scenics/'+encodeURIComponent(scenic)+'/manifest';$('manifestLink').href=path;const body=await api(path);$('preview').textContent=JSON.stringify(body,null,2)}
+async function safe(fn){try{$('message').textContent='';await fn()}catch(e){$('message').textContent='错误：'+e.message}}
+$('scenic').onchange=()=>safe(loadStations);
+$('station').onchange=()=>safe(loadMaterials);
+$('materials').onclick=e=>{const id=e.target.dataset.id;if(id&&confirm('删除该素材引用？文件不会立即删除，已发布版本保持不变。'))safe(async()=>{await api('/api/materials/'+id,{method:'DELETE'});await loadMaterials()})};
+$('upload').onclick=()=>safe(async()=>{
+  const f=$('file').files[0],title=$('title').value.trim();if(!f||!title)throw Error('请选择文件并填写标题');
+  const q=new URLSearchParams({stationId:$('station').value,categoryCode:$('category').value,title,filename:f.name});
+  $('upload').disabled=true;
+  try{await api('/api/materials?'+q,{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:f});$('message').textContent='上传成功，请发布后同步到车机';$('file').value='';await loadMaterials()}finally{$('upload').disabled=false}
+});
+$('publish').onclick=()=>safe(async()=>{await api('/api/scenics/'+encodeURIComponent($('scenic').value)+'/publish',{method:'POST'});await loadScenics();$('message').textContent='已发布新版本'});
+safe(async()=>{const cs=await api('/api/categories');$('category').innerHTML=cs.map(x=>`<option value="${esc(x.code)}">${esc(x.name)}</option>`).join('');await loadScenics()});
+</script>
+</html>

@@ -1,0 +1,12 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'dev.demo.scenic'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'dev.demo.scenic'
+        minSdk 26
+        targetSdk 28
+        versionCode 1
+        versionName '1.0'
+    }
+}
