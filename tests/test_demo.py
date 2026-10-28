@@ -61,9 +61,36 @@ class DemoTests(unittest.TestCase):
 
     def test_admin_page_and_script(self):
         with urlopen(self.url + "/") as response:
-            self.assertIn(b'/app.js', response.read())
+            markup = response.read()
+            self.assertIn(b'/app.js', markup)
+            self.assertIn(b'id="uploadAndPublish"', markup)
+            self.assertIn(b'id="files" type="file" multiple', markup)
+            self.assertIn(b'id="advanced"', markup)
         with urlopen(self.url + "/app.js") as response:
-            self.assertIn(b'/api/categories', response.read())
+            script = response.read()
+            self.assertIn(b'/api/categories', script)
+            self.assertIn(b'uploadAndPublish', script)
+
+    def test_multiple_uploads_with_one_release(self):
+        old = self.fetch("/api/scenics/A/manifest")
+        self.assertEqual(old["version"], 1)
+        uploaded = []
+        for name, category, content in (
+            ("sample.png", "gallery", self.server.make_png((25, 150, 100))),
+            ("sample.wav", "guide_audio", self.server.make_wav(800)),
+        ):
+            query = urlencode({"stationId": "A-S01", "categoryCode": category,
+                               "title": "新素材-" + name, "filename": name})
+            result = self.fetch("/api/materials?" + query, "POST", content)
+            uploaded.append(result["fileId"])
+        unchanged = self.fetch("/api/scenics/A/manifest")
+        self.assertEqual(unchanged, old)
+        self.fetch("/api/scenics/A/publish", "POST", b"")
+        latest = self.fetch("/api/scenics/A/manifest")
+        self.assertEqual(latest["version"], 2)
+        for file_id in uploaded:
+            self.assertIn(file_id, latest["files"])
+        self.assertEqual(self.fetch("/api/scenics/B/manifest")["version"], 1)
 
     def test_seed_and_publish(self):
         scenics = self.fetch("/api/scenics")
