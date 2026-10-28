@@ -20,6 +20,8 @@ python3 server.py
 
 已有素材旁有「替换」「删除」，操作完成会**自动发布**，不用再跳到另一个区域点发布。多个文件的自动分类和批量上传由网页完成，后端仍沿用简单的单文件上传接口。
 
+**替换现在是原位更新**：通过 `PUT /api/materials/{materialId}?filename=new.mp3` 上传新文件，保留原素材 ID、分类、标题和顺序，不再通过「新增再删除」模拟替换。新版本发布前，车机仍读取上一版素材。若更新失败，旧文件仍保留。
+
 上传途中如果失败，已成功上传的项目会保留为*待发布草稿*，同一页面点击按钮可继续提交剩余文件；**所有文件上传成功前不会自动发布**。分类和原始 JSON 放在页面底部默认收起的「高级设置」里。
 
 ### 新增一种素材分类（不需要改代码）
@@ -54,6 +56,7 @@ PATCH  /api/categories/{code}                  (JSON: name?,mediaType?,position?
 DELETE /api/categories/{code}
 GET    /api/materials?stationId=A-S01
 POST   /api/materials?stationId=A-S01&categoryCode=gallery&title=xxx&filename=photo.png
+PUT    /api/materials/{materialId}?filename=replacement.png
 DELETE /api/materials/{materialId}
 POST   /api/scenics/A/publish
 GET    /api/scenics/A/manifest
@@ -73,11 +76,11 @@ python3 client.py
 # 重复执行：输出每个景区 0 files to download
 ```
 
-目录 `runtime/device/{A,B,C}/active.json` + `files/{sha256}.ext` 是 Android 端目录的模拟。断网时使用已经同步的 `active.json` 和本地文件。修改素材并发布后重跑客户端，仅下载新增的哈希文件。
+目录 `runtime/device/{A,B,C}/active.json` + `files/{sha256}.ext` 是 Android 端目录的模拟。断网时使用已经同步的 `active.json` 和本地文件。修改素材并发布后重跑客户端，仅下载新增的哈希文件。已下载完整但 SHA-256 不匹配的 `.part` 文件会被丢弃并重新下载，避免无限请求无效的 HTTP Range。
 
 ## Android 原生 App
 
-用 Android Studio 打开 `android-app/`，构建运行即可。Android 示例（Java，最低 API 26）启动时自动下载所有景区；按 `active.json` 动态展示任意分类、任意数量的素材，并依据文件 `mimeType` 渲染**图片预览、音频播放、视频播放**。断网重开读取本地数据。无需用户点击下载。
+用 Android Studio 打开 `android-app/`，构建运行即可。Android 示例（Java，最低 API 26）启动时自动下载所有景区；顶部三个按钮可**切换当前景区**，并记住上一次选择。只展示选中的景区，按 `active.json` 动态展示任意分类、任意数量的素材，并依据文件 `mimeType` 渲染**图片预览、音频播放、视频播放**。断网重开读取本地数据。无需用户点击下载。
 
 例如新增 `background_music` 或 `safety_audio`，Android 不需要硬编码分类名称，而是自动复用音频播放器。这里只演示**手动点击播放预览**，不代表具备到站自动播报、循环、抢占优先级等具体车机业务规则。
 

@@ -92,6 +92,57 @@ class DemoTests(unittest.TestCase):
             self.assertIn(file_id, latest["files"])
         self.assertEqual(self.fetch("/api/scenics/B/manifest")["version"], 1)
 
+    def test_replacement_preserves_material_id_and_sort_order(self):
+        before = self.fetch("/api/materials?stationId=A-S01")
+        image = next(item for item in before if item["categoryCode"] == "gallery")
+        manifest_before = self.fetch("/api/scenics/A/manifest")
+        new_content = self.server.make_png((201, 52, 110))
+        result = self.fetch(
+            "/api/materials/" + image["id"] + "?filename=replacement.png",
+            method="PUT", data=new_content
+        )
+        self.assertEqual(result["id"], image["id"])
+        self.assertNotEqual(result["fileId"], image["fileId"])
+        after = self.fetch("/api/materials?stationId=A-S01")
+        self.assertEqual([item["id"] for item in after], [item["id"] for item in before])
+        self.assertEqual([item["title"] for item in after], [item["title"] for item in before])
+        self.assertEqual(self.fetch("/api/scenics/A/manifest"), manifest_before)
+        self.failure(400, lambda: self.fetch(
+            "/api/materials/" + image["id"] + "?filename=wrong.wav",
+            method="PUT", data=self.server.make_wav(600)
+        ))
+        self.assertEqual(self.fetch("/api/materials?stationId=A-S01"), after)
+        self.fetch("/api/scenics/A/publish", "POST", b"")
+        manifest_after = self.fetch("/api/scenics/A/manifest")
+        self.assertIn(result["fileId"], manifest_after["files"])
+        self.assertIn(image["fileId"], manifest_before["files"])
+        self.assertNotIn(image["fileId"], manifest_after["files"])
+        original_items = [item["id"] for group in manifest_before["stations"][0]["categories"]
+                          for item in group["items"]]
+        latest_items = [item["id"] for group in manifest_after["stations"][0]["categories"]
+                        for item in group["items"]]
+        self.assertEqual(latest_items, original_items)
+        self.failure(404, lambda: self.fetch(
+            "/api/materials/m_000000000000?filename=replacement.png",
+            method="PUT", data=new_content
+        ))
+
+    def test_pc_sync_recovers_full_length_corrupted_partial(self):
+        manifest = self.fetch("/api/scenics/A/manifest")
+        meta = next(iter(manifest["files"].values()))
+        destination = Path(self.temp.name) / "broken-device"
+        store = destination / "A" / "files"
+        store.mkdir(parents=True)
+        broken = store / (meta["sha256"] + Path(meta["url"]).suffix + ".part")
+        broken.write_bytes(b"z" * meta["size"])
+        command = [sys.executable, str(ROOT / "client.py"),
+                   "--server", self.url, "--dir", str(destination)]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertIn("ready offline", result.stdout)
+        self.assertFalse(broken.exists())
+        self.assertEqual(json.loads((destination / "A/active.json").read_text())["version"],
+                         manifest["version"])
+
     def test_seed_and_publish(self):
         scenics = self.fetch("/api/scenics")
         self.assertEqual(len(scenics), 3)

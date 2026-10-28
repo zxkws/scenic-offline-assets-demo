@@ -3,8 +3,10 @@ package dev.demo.scenic;
 import android.app.Activity;
 import android.os.Bundle;
 import android.graphics.Color;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.*;
@@ -18,43 +20,94 @@ import java.util.Iterator;
 public class MainActivity extends Activity {
     // Android emulator host address. Replace with the LAN server for an actual vehicle.
     private static final String BASE = "http://10.0.2.2:8765";
+    private static final String[] SCENICS = {"A", "B", "C"};
     private MediaBrowser browser;
+    private TextView statusView;
+    private Button[] scenicButtons;
+    private String selectedScenic;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        selectedScenic = getPreferences(MODE_PRIVATE).getString("selectedScenic", "A");
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        statusView = new TextView(this);
+        statusView.setTextSize(16);
+        statusView.setPadding(24, 18, 24, 8);
+        page.addView(statusView);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        scenicButtons = new Button[SCENICS.length];
+        for (int i = 0; i < SCENICS.length; i++) {
+            final String id = SCENICS[i];
+            Button button = new Button(this);
+            button.setText(id);
+            button.setAllCaps(false);
+            button.setOnClickListener(view -> {
+                selectedScenic = id;
+                getPreferences(MODE_PRIVATE).edit().putString("selectedScenic", id).apply();
+                showSelected();
+            });
+            scenicButtons[i] = button;
+            tabs.addView(button, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        }
+        page.addView(tabs);
         ScrollView scroll = new ScrollView(this);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(24, 32, 24, 32);
         scroll.addView(content);
+        page.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
         browser = new MediaBrowser(this, content);
-        setContentView(scroll);
-        render("正在自动同步三个景区…");
+        setContentView(page);
+        showSelected();
+        setStatus("正在检查并同步三个景区…");
         new Thread(() -> {
-            try { sync(); render("同步完成"); }
-            catch (Exception e) { render("网络不可用或下载失败，继续使用已有离线数据：" + e.getMessage()); }
+            try { sync(); setStatus("三个景区同步完成，已下载素材可离线使用"); }
+            catch (Exception e) {
+                setStatus("同步失败，已有离线素材仍可使用：" + e.getMessage());
+            }
         }, "scenic-sync").start();
     }
 
-    private void render(String status) {
+    private void setStatus(String status) {
         runOnUiThread(() -> {
             if (isDestroyed()) return;
-            browser.clear();
-            browser.label(status, 18, Color.DKGRAY);
-            for (String id : new String[]{"A", "B", "C"}) {
-                File folder = new File(getFilesDir(), "scenic/" + id);
-                File active = new File(folder, "active.json");
-                if (!active.isFile()) {
-                    browser.label(id + "：尚未下载", 16, Color.GRAY);
-                    continue;
-                }
+            statusView.setText(status);
+        });
+    }
+
+    private void showSelected() {
+        // All three scenic areas are downloaded; only the selected one is displayed.
+        // A change of selection is intentional and may stop current playback.
+        browser.clear();
+        for (int i = 0; i < SCENICS.length; i++) {
+            File manifestFile = new File(getFilesDir(),
+                    "scenic/" + SCENICS[i] + "/active.json");
+            String name = "景区 " + SCENICS[i];
+            if (manifestFile.isFile()) {
                 try {
-                    browser.showScenic(new JSONObject(read(active)), folder);
-                } catch (Exception e) {
-                    browser.label(id + "：本地清单读取失败", 16, Color.RED);
+                    name = new JSONObject(read(manifestFile)).optString("scenicName", name);
+                } catch (Exception ignored) {
+                    // An invalid manifest will be reported for the selected scenic.
                 }
             }
-        });
+            scenicButtons[i].setText(name);
+            scenicButtons[i].setAlpha(SCENICS[i].equals(selectedScenic) ? 1.0f : 0.65f);
+        }
+        File folder = new File(getFilesDir(), "scenic/" + selectedScenic);
+        File active = new File(folder, "active.json");
+        if (!active.isFile()) {
+            browser.label("当前景区尚未完成下载，联网后会自动同步。", 16, Color.GRAY);
+            return;
+        }
+        try {
+            browser.showScenic(new JSONObject(read(active)), folder);
+        } catch (Exception e) {
+            browser.label("当前景区本地清单读取失败", 16, Color.RED);
+        }
     }
 
     private void sync() throws Exception {
@@ -88,7 +141,12 @@ public class MainActivity extends Activity {
                 out.getFD().sync();
             }
             if (!tmp.renameTo(new File(scenic, "active.json"))) throw new IOException("activate failed");
-            render("已同步景区 " + id);
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                statusView.setText("已同步景区 " + id + "，继续检查其他景区…");
+                // Do not stop a playing audio/video merely because syncing finishes.
+                if (id.equals(selectedScenic) && !browser.isPlaying()) showSelected();
+            });
         }
     }
 

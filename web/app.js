@@ -179,6 +179,15 @@ async function uploadMaterial(file, stationId, categoryCode, title) {
   });
 }
 
+async function replaceMaterial(file, itemId) {
+  const query = new URLSearchParams({ filename: file.name });
+  return api('/api/materials/' + encodeURIComponent(itemId) + '?' + query, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file
+  });
+}
+
 async function publish(scenicId) {
   await api('/api/scenics/' + encodeURIComponent(scenicId) + '/publish', { method: 'POST' });
 }
@@ -298,8 +307,7 @@ $('replaceFile').onchange = event => {
   }
   safe(() => runBusy(async () => {
     notify('正在上传替换文件…');
-    await uploadMaterial(file, $('station').value, item.categoryCode, item.title);
-    await api('/api/materials/' + encodeURIComponent(item.id), { method: 'DELETE' });
+    await replaceMaterial(file, item.id);
     await publish($('scenic').value);
     await loadScenics();
     notify('已替换并发布。');

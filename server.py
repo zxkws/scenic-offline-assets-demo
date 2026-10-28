@@ -354,6 +354,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(404, {"error": str(error)})
         if url.path != "/api/materials":
             return self.respond(404, {"error": "Not found"})
+        return self.save_material()
+
+    def do_PUT(self):
+        """Replace a material's file, retaining its identity, title, and position."""
+        match = re.fullmatch(r"/api/materials/(m_[0-9a-f]+)", urlsplit(self.path).path)
+        if not match:
+            self.close_connection = True
+            return self.respond(404, {"error": "Not found"})
+        return self.save_material(replace_id=match.group(1))
+
+    def save_material(self, replace_id=None):
+        """Handle uploads and in-place replacement with the same file validation."""
+        url = urlsplit(self.path)
         params = parse_qs(url.query)
         station = params.get("stationId", [""])[0]
         category = params.get("categoryCode", [""])[0]
@@ -363,10 +376,21 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        if not title or len(title) > 120 or extension not in MIME or not 0 < length <= MAX_UPLOAD:
+        if (not replace_id and (not title or len(title) > 120)
+                or extension not in MIME or not 0 < length <= MAX_UPLOAD):
             self.close_connection = True
             return self.respond(400, {"error": "Bad title or unsupported file (max 512 MB)"})
         with database() as db:
+            if replace_id:
+                original = db.execute("""
+                    SELECT m.station_id, m.category_code, m.title
+                    FROM station_material m WHERE m.id=?
+                """, (replace_id,)).fetchone()
+                if original is None:
+                    self.close_connection = True
+                    return self.respond(404, {"error": "素材不存在"})
+                station, category, title = (
+                    original["station_id"], original["category_code"], original["title"])
             category_row = db.execute("SELECT media_type FROM category WHERE code=?", (category,)).fetchone()
             if (not db.execute("SELECT 1 FROM station WHERE id=?", (station,)).fetchone()
                 or category_row is None):
@@ -402,8 +426,17 @@ class Handler(BaseHTTPRequestHandler):
                     temporary = None
                     db.execute("INSERT INTO file VALUES (?,?,?,?,?)",
                                (file_id, name, length, sha, MIME[extension]))
-                item_id = attach(db, station, category, file_id, title)
-            self.respond(201, {"id": item_id, "fileId": file_id})
+                if replace_id:
+                    updated = db.execute("""
+                        UPDATE station_material SET file_id=?
+                        WHERE id=? AND station_id=? AND category_code=?
+                    """, (file_id, replace_id, station, category))
+                    if not updated.rowcount:
+                        raise ValueError("素材已被删除或修改，请刷新页面")
+                    item_id = replace_id
+                else:
+                    item_id = attach(db, station, category, file_id, title)
+            self.respond(200 if replace_id else 201, {"id": item_id, "fileId": file_id})
         except ValueError as error:
             self.respond(400, {"error": str(error)})
         finally:

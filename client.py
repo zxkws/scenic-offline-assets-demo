@@ -41,6 +41,15 @@ def sync(server, destination):
         for meta, target in pending:
             part = target.with_suffix(target.suffix + ".part")
             size = part.stat().st_size if part.exists() else 0
+            # Complete valid .part may remain after a crash before rename.
+            if size == meta["size"] and valid(part, meta):
+                os.replace(part, target)
+                continue
+            # A full-length but corrupted .part (or oversized one) cannot
+            # be resumed: HTTP Range would begin beyond the end (416).
+            if size >= meta["size"]:
+                part.unlink()
+                size = 0
             headers = {"Range": f"bytes={size}-"} if size else {}
             request = Request(urljoin(server, meta["url"]), headers=headers)
             with urlopen(request, timeout=60) as response:
@@ -56,6 +65,8 @@ def sync(server, destination):
                             break
                         out.write(block)
             if not valid(part, meta):
+                # Avoid making every subsequent run fail on a corrupt .part.
+                part.unlink(missing_ok=True)
                 raise RuntimeError(f"Hash mismatch: {meta['url']}")
             os.replace(part, target)
         # Only commit the new manifest after ALL referenced files have been validated.

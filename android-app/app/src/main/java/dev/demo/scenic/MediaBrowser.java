@@ -164,4 +164,9 @@ final class MediaBrowser {
             video = null;
         }
     }
+
+    boolean isPlaying() {
+        return (audio != null && audio.isPlaying()) ||
+               (video != null && video.isPlaying());
+    }
 }
